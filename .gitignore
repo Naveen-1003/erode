@@ -1,0 +1,27 @@
+# Python virtual env and cache
+backend/.venv/
+backend/app/__pycache__/
+backend/app/ai/__pycache__/
+backend/app/api/__pycache__/
+backend/app/services/__pycache__/
+backend/app/database/__pycache__/
+backend/tests/__pycache__/
+backend/*.db
+backend/uploads/
+
+# Node dependencies and build files
+node_modules/
+frontend-mobile/node_modules/
+frontend-mobile/.expo/
+frontend-mobile/.metro/
+frontend-mobile/dist/
+
+# Large pre-trained model binaries (should be downloaded/placed locally)
+backend/models/mc3_ucf101.pth
+backend/models/pose_landmarker_full.task
+
+# OS and IDE caches
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
