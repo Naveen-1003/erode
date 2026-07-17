@@ -19,9 +19,11 @@ AI-powered fitness app with real-time pose estimation and calorie tracking. Fast
 cd backend
 
 # Install dependencies
+pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 
 # Download ML model weights (first-time setup)
+# Note: This step also clones YOWOv2 and fetches its weights.
 python models/download_weights.py
 
 # Run the server (accessible from all network interfaces)

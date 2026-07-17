@@ -15,8 +15,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WS_URL } from '../../../services/api';
 import { Play, Square, Flame, Clock, Activity, Zap } from 'lucide-react-native';
 import { DrawerMenuButton } from '../../../components/drawer-menu-button';
-
-const EXERCISES = ['Squat', 'Pushups', 'Jumping Jacks', 'Running', 'Walking'];
+import { formatActionLabel } from '../../../utils/format-action-label';
 
 // Isolated from parent re-renders caused by live-metric state updates.
 // animateShutter={false} suppresses the 1-second visual flash from takePictureAsync.
@@ -30,7 +29,7 @@ const CameraPreview = React.memo(function CameraPreview({
 
 export default function CameraScreen() {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [selectedActivity, setSelectedActivity] = useState('Squat');
+  const [selectedActivity, setSelectedActivity] = useState('Auto-Detect');
   const [isRecording, setIsRecording] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -100,7 +99,7 @@ export default function CameraScreen() {
         const startTime = Date.now();
         ws.send(JSON.stringify({
           event: 'start_workout',
-          activity: selectedActivity,
+          activity: 'Auto-Detect',
           timestamp: startTime / 1000
         }));
 
@@ -129,7 +128,6 @@ export default function CameraScreen() {
             const photo = await cameraRef.current.takePictureAsync({
               quality: 0.2,
               base64: true,
-              skipProcessing: true,
               shutterSound: false,
             });
 
@@ -161,6 +159,9 @@ export default function CameraScreen() {
           setLiveCalories(data.calories ?? 0);
           setLiveIntensity(data.intensity ?? 'Low');
           setLiveSpeed(data.movement_score ?? 0);
+          if (data.activity) {
+            setSelectedActivity(data.activity);
+          }
         } else if (data.event === 'workout_saved') {
           stopIntervals();
           setIsRecording(false);
@@ -177,7 +178,7 @@ export default function CameraScreen() {
       ws.onerror = (e) => {
         console.error('[Burn-Ex Live] WebSocket error:', e);
         if (!stoppingRef.current) {
-          setErrorState('Connection to the backend lost. Please try again.');
+          setErrorState('Connection to the backend lost. Please check your history for auto-saved progress.');
           setLoading(false);
           setIsRecording(false);
           stopIntervals();
@@ -186,6 +187,9 @@ export default function CameraScreen() {
 
       ws.onclose = () => {
         console.log('[Burn-Ex Live] WebSocket closed.');
+        if (!stoppingRef.current && timerRef.current) {
+            Alert.alert('Session Ended', 'The connection dropped. Your workout up to this point was auto-saved to your history if it was longer than a few seconds.');
+        }
         setIsRecording(false);
         stopIntervals();
         // stoppingRef is intentionally NOT reset here to prevent onerror firing spuriously after close
@@ -202,6 +206,7 @@ export default function CameraScreen() {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setIsRecording(false);
       stopIntervals();
+      Alert.alert('Session Disconnected', 'The connection was already lost. Check your history for auto-saved progress.');
       return;
     }
 
@@ -246,7 +251,7 @@ export default function CameraScreen() {
                 <View style={styles.pulseRed} />
                 <Text style={styles.badgeText}>LIVE</Text>
               </View>
-              <Text style={styles.liveActivity}>{selectedActivity}</Text>
+              <Text style={styles.liveActivity}>{formatActionLabel(selectedActivity)}</Text>
             </View>
 
             {/* Center Dashboard Overlay */}
@@ -292,31 +297,11 @@ export default function CameraScreen() {
       {/* Control Panel (Standard selection view when not recording) */}
       {!isRecording ? (
         <ScrollView style={styles.controls} contentContainerStyle={styles.controlsContent}>
-          <Text style={styles.controlsTitle}>Select Exercise</Text>
+          <Text style={styles.controlsTitle}>Ready to Burn?</Text>
 
           {errorState ? (
             <Text style={styles.errorBanner}>{errorState}</Text>
           ) : null}
-
-          <View style={styles.exerciseSelector}>
-            {EXERCISES.map((act) => (
-              <TouchableOpacity
-                key={act}
-                style={[
-                  styles.exerciseChip,
-                  selectedActivity === act ? styles.exerciseChipSelected : null
-                ]}
-                onPress={() => setSelectedActivity(act)}
-              >
-                <Text style={[
-                  styles.exerciseChipText,
-                  selectedActivity === act ? styles.exerciseChipTextSelected : null
-                ]}>
-                  {act}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
 
           <TouchableOpacity 
             style={styles.startButton} 
@@ -502,33 +487,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#FFF',
     marginBottom: 16,
-  },
-  exerciseSelector: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    marginBottom: 24,
-  },
-  exerciseChip: {
-    backgroundColor: '#0F0F12',
-    borderWidth: 1,
-    borderColor: '#2C2C32',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-  },
-  exerciseChipSelected: {
-    backgroundColor: 'rgba(255, 59, 48, 0.15)',
-    borderColor: '#FF3B30',
-  },
-  exerciseChipText: {
-    color: '#AEAEB2',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  exerciseChipTextSelected: {
-    color: '#FF3B30',
-    fontWeight: 'bold',
   },
   startButton: {
     backgroundColor: '#FF3B30',

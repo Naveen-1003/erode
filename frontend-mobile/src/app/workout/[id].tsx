@@ -12,6 +12,13 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL } from '../../services/api';
 import { Flame, Clock, Zap, ShieldAlert, ArrowLeft, HeartPulse } from 'lucide-react-native';
+import { formatActionLabel } from '../../utils/format-action-label';
+
+interface WorkoutFrame {
+  frame_number: number;
+  action_detected: string;
+  calories_burnt: number;
+}
 
 interface WorkoutSession {
   id: number;
@@ -20,6 +27,7 @@ interface WorkoutSession {
   intensity: string;
   calories: number;
   created_at: string;
+  frames?: WorkoutFrame[];
 }
 
 export default function WorkoutDetailScreen() {
@@ -83,12 +91,11 @@ export default function WorkoutDetailScreen() {
   };
 
   const getPersonalizedFeedback = (w: WorkoutSession) => {
-    const act = w.activity.toLowerCase();
     const kcal = w.calories;
     const durMins = w.duration / 60;
     
     if (w.intensity.toLowerCase() === 'high') {
-      return `Outstanding effort! You maintained a High movement velocity during this ${w.activity} session. This triggers a high cardiorespiratory demand, maximizing calorie burn (${Math.round(kcal)} kcal) and boosting post-exercise oxygen consumption (EPOC). Make sure to prioritize hydration and consume a protein-rich meal within 2 hours for muscle recovery.`;
+      return `Outstanding effort! You maintained a High movement velocity during this ${formatActionLabel(w.activity)} session. This triggers a high cardiorespiratory demand, maximizing calorie burn (${Math.round(kcal)} kcal) and boosting post-exercise oxygen consumption (EPOC). Make sure to prioritize hydration and consume a protein-rich meal within 2 hours for muscle recovery.`;
     } else if (w.intensity.toLowerCase() === 'medium') {
       return `Solid conditioning! You kept a consistent Medium intensity pace for ${Math.round(durMins)} minutes. This is the optimal aerobic zone for improving metabolic health, burning fat, and building muscular endurance. Great job logging this session!`;
     } else {
@@ -132,7 +139,7 @@ export default function WorkoutDetailScreen() {
       <ScrollView contentContainerStyle={styles.scrollContainer}>
         {/* Activity Name & Date */}
         <View style={styles.titleSection}>
-          <Text style={styles.activityName}>{workout.activity}</Text>
+          <Text style={styles.activityName}>{formatActionLabel(workout.activity)}</Text>
           <Text style={styles.date}>{formatDate(workout.created_at)}</Text>
         </View>
 
@@ -184,6 +191,27 @@ export default function WorkoutDetailScreen() {
             {getPersonalizedFeedback(workout)}
           </Text>
         </View>
+
+        {/* Frame-by-Frame Report */}
+        {workout.frames && workout.frames.length > 0 && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Frame-by-Frame Analysis</Text>
+            <View style={styles.tableHeader}>
+              <Text style={[styles.tableCellHeader, { flex: 0.5 }]}>Frame</Text>
+              <Text style={[styles.tableCellHeader, { flex: 1 }]}>Action</Text>
+              <Text style={[styles.tableCellHeader, { flex: 1, textAlign: 'right' }]}>Kcal</Text>
+            </View>
+            {workout.frames.map((frame, index) => (
+              <View key={index} style={styles.tableRow}>
+                <Text style={[styles.tableCell, { flex: 0.5 }]}>{frame.frame_number}</Text>
+                <Text style={[styles.tableCell, { flex: 1 }]}>{formatActionLabel(frame.action_detected)}</Text>
+                <Text style={[styles.tableCell, { flex: 1, textAlign: 'right' }]}>
+                  {frame.calories_burnt.toFixed(3)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         <TouchableOpacity 
           style={styles.doneButton}
@@ -367,5 +395,27 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  tableHeader: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2C2C32',
+    paddingBottom: 8,
+    marginBottom: 8,
+  },
+  tableCellHeader: {
+    color: '#8E8E93',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  tableRow: {
+    flexDirection: 'row',
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#16161A',
+  },
+  tableCell: {
+    color: '#E5E5EA',
+    fontSize: 14,
   },
 });

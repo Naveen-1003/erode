@@ -16,6 +16,7 @@ import { API_URL } from '../../../services/api';
 import { LineChart } from 'react-native-chart-kit';
 import { Flame, Dumbbell, Clock, ChevronRight, TrendingUp } from 'lucide-react-native';
 import { DrawerMenuButton } from '../../../components/drawer-menu-button';
+import { formatActionLabel } from '../../../utils/format-action-label';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -136,7 +137,7 @@ export default function DashboardScreen() {
     const recentWorkouts = [...workouts].slice(0, 6).reverse();
     const labels = recentWorkouts.map((w, index) => {
       // Return brief name or index
-      const act = w.activity.split(' ')[0];
+      const act = formatActionLabel(w.activity).split(' ')[0];
       return `${index + 1}. ${act.substring(0, 4)}`;
     });
     const calories = recentWorkouts.map(w => w.calories);
@@ -300,7 +301,7 @@ export default function DashboardScreen() {
                 <Dumbbell color="#FF3B30" size={18} />
               </View>
               <View style={styles.recentDetails}>
-                <Text style={styles.recentTitle}>{w.activity}</Text>
+                <Text style={styles.recentTitle}>{formatActionLabel(w.activity)}</Text>
                 <Text style={styles.recentMeta}>{Math.round(w.duration / 60)} min • {w.intensity} Intensity</Text>
               </View>
               <View style={styles.recentRight}>

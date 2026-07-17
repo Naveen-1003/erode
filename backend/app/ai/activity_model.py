@@ -122,6 +122,14 @@ class ActivityRecognizer:
         if not frames:
             return torch.zeros((1, 3, 16, 112, 112), dtype=torch.float32, device=self.device)
 
+        if len(frames) == 1:
+            frame = cv2.resize(frames[0], (112, 112))
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            norm  = (rgb - mean) / std
+            chw   = np.transpose(norm, (2, 0, 1))
+            clip  = np.stack([chw] * 16, axis=1) # [3, 16, 112, 112]
+            return torch.tensor(clip, dtype=torch.float32).unsqueeze(0).to(self.device)
+
         indices = np.linspace(0, len(frames) - 1, 16, dtype=int)
         processed = []
         for i in indices:

@@ -32,3 +32,16 @@ class Workout(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="workouts")
+    frames = relationship("WorkoutFrame", back_populates="workout", cascade="all, delete-orphan")
+
+class WorkoutFrame(Base):
+    __tablename__ = "workout_frames"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workout_id = Column(Integer, ForeignKey("workouts.id", ondelete="CASCADE"), nullable=False)
+    frame_number = Column(Integer, nullable=False)
+    action_detected = Column(String, nullable=False)
+    calories_burnt = Column(Float, nullable=False)
+
+    workout = relationship("Workout", back_populates="frames")
+
