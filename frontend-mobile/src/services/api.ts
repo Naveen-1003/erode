@@ -24,8 +24,13 @@ const getBackendHost = () => {
     // because isDevice is unreliable in dev builds (can be false on a real device).
     if (debuggerHost) {
       const ip = debuggerHost.split(':')[0];
-      // Loopback means AVD emulator; use Android's special host alias.
-      if (ip === '127.0.0.1' || ip === 'localhost') return '10.0.2.2:8000';
+      // Loopback means Metro was reached via "localhost" - true for an AVD emulator
+      // AND for a physical device with `adb reverse tcp:8081 tcp:8081` active (our
+      // documented USB debugging workflow). Both cases are served by localhost:8000
+      // as long as `adb reverse tcp:8000 tcp:8000` is also active, which the README
+      // requires either way - so there's no reliable way (or need) to special-case
+      // the emulator here.
+      if (ip === '127.0.0.1' || ip === 'localhost') return 'localhost:8000';
       return `${ip}:8000`;
     }
     // No Metro host found. In release builds !isDevice reliably means AVD.

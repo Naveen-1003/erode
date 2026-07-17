@@ -19,6 +19,7 @@ from ..ai.activity_model import ActivityRecognizer
 from ..ai.pose_model import PoseEstimator
 from ..ai.intensity import IntensityEngine
 from ..ai.calorie_model import CalorieRegressor
+from ..ai.pose_energy_model import PoseEnergyEstimator
 from ..services.video_processing import VideoProcessor
 
 logger = logging.getLogger("burn_ex_prediction")
@@ -30,6 +31,10 @@ activity_recognizer = ActivityRecognizer()
 pose_estimator = PoseEstimator()
 intensity_engine = IntensityEngine()
 calorie_regressor = CalorieRegressor()
+# End-to-end pose->energy regressor. Primary calorie source when a trained
+# checkpoint is present; otherwise .available is False and we fall back to the
+# MET / XGBoost path below, so behaviour is unchanged until a model is trained.
+pose_energy_estimator = PoseEnergyEstimator()
 
 # Helper to authenticate WebSockets
 def get_websocket_user(token: str, db: Session) -> Optional[User]:
@@ -117,16 +122,28 @@ def predict_workout_video(
         u_weight = weight if weight is not None else current_user.weight
         u_gender = gender if gender is not None else current_user.gender
         
-        # 5. XGBoost Calorie estimation
-        calories = calorie_regressor.predict(
-            activity=activity,
-            age=u_age,
-            height=u_height,
-            weight=u_weight,
-            duration_seconds=workout_duration,
-            movement_score=movement_score,
-            gender=u_gender
-        )
+        # 5. Calorie estimation.
+        #    Primary: end-to-end pose->energy regressor (uses the full pose
+        #    sequence). Fallback: activity + movement_score -> XGBoost/MET when
+        #    no trained pose->energy checkpoint is available.
+        calories = None
+        if pose_energy_estimator.available:
+            calories = pose_energy_estimator.predict_calories(
+                pose_history=pose_history,
+                weight=u_weight,
+                duration_seconds=workout_duration,
+                fps=metadata["fps"],
+            )
+        if calories is None:
+            calories = calorie_regressor.predict(
+                activity=activity,
+                age=u_age,
+                height=u_height,
+                weight=u_weight,
+                duration_seconds=workout_duration,
+                movement_score=movement_score,
+                gender=u_gender
+            )
         
         # 6. Save workout to database
         db_workout = Workout(
@@ -255,17 +272,24 @@ async def live_predict_websocket(websocket: WebSocket):
                 movement_score = intensity_res["movement_score"]
                 intensity_level = intensity_res["intensity"]
 
-                # Incremental MET-based accumulation — XGBoost is trained on full sessions
-                # and returns a fixed ~87 kcal regardless of duration for short inputs.
-                # MET formula scales linearly and gives correct live estimates.
+                # Incremental accumulation. Primary: pose->energy regressor gives a
+                # kcal/sec rate from the current pose window. Fallback: MET formula
+                # (XGBoost is trained on full sessions and returns a fixed ~87 kcal
+                # regardless of duration for short inputs).
                 if last_frame_timestamp is not None:
                     time_slice = min(timestamp - last_frame_timestamp, 3.0)
                     if time_slice > 0:
-                        calorie_rate = calorie_regressor.met_rate_per_second(
-                            activity=current_activity,
-                            weight=user.weight,
-                            intensity=intensity_level,
-                        )
+                        calorie_rate = None
+                        if pose_energy_estimator.available:
+                            calorie_rate = pose_energy_estimator.calorie_rate_per_second(
+                                pose_history, user.weight
+                            )
+                        if calorie_rate is None:
+                            calorie_rate = calorie_regressor.met_rate_per_second(
+                                activity=current_activity,
+                                weight=user.weight,
+                                intensity=intensity_level,
+                            )
                         cumulative_calories += calorie_rate * time_slice
                 last_frame_timestamp = timestamp
 
@@ -286,6 +310,8 @@ async def live_predict_websocket(websocket: WebSocket):
                 if not landmarks or not start_time:
                     continue
 
+                active_duration = max(0.1, timestamp - start_time)
+
                 pose_history.append(landmarks)
                 if len(pose_history) > 150:
                     pose_history.pop(0)
@@ -298,11 +324,17 @@ async def live_predict_websocket(websocket: WebSocket):
                 if last_frame_timestamp is not None:
                     time_slice = min(timestamp - last_frame_timestamp, 3.0)
                     if time_slice > 0:
-                        calorie_rate = calorie_regressor.met_rate_per_second(
-                            activity=current_activity,
-                            weight=user.weight,
-                            intensity=intensity_level,
-                        )
+                        calorie_rate = None
+                        if pose_energy_estimator.available:
+                            calorie_rate = pose_energy_estimator.calorie_rate_per_second(
+                                pose_history, user.weight
+                            )
+                        if calorie_rate is None:
+                            calorie_rate = calorie_regressor.met_rate_per_second(
+                                activity=current_activity,
+                                weight=user.weight,
+                                intensity=intensity_level,
+                            )
                         cumulative_calories += calorie_rate * time_slice
                 last_frame_timestamp = timestamp
 
