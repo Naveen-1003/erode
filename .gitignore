@@ -6,6 +6,7 @@ backend/app/api/__pycache__/
 backend/app/services/__pycache__/
 backend/app/database/__pycache__/
 backend/tests/__pycache__/
+backend/datasets/
 backend/*.db
 backend/uploads/
 
