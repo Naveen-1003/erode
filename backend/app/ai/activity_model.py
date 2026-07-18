@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import torch.nn as nn
 import numpy as np
@@ -82,6 +83,49 @@ def ucf_to_encoder_class(ucf_class: str) -> str:
     return "HIIT"   # default to general high-intensity
 
 
+def format_ucf_label(ucf_class: str) -> str:
+    """PascalCase UCF101 class name -> readable display string, e.g.
+    "BodyWeightSquats" -> "Body Weight Squats", "YoYo" -> "Yo Yo". This is the
+    specific workout name reported to the user; ucf_to_encoder_class() above
+    is a *separate*, coarser bucketing used only for calorie MET lookups."""
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", ucf_class).strip()
+
+
+# Curated "main workouts" MC3-18 is allowed to name specifically. UCF101 has
+# 101 classes total, but most (ApplyEyeMakeup, PlayingSitar, HorseRace,
+# Bowling, ...) have nothing to do with a home/gym workout and only dilute
+# accuracy: the model has to split probability mass across all 101 every
+# prediction, so a real squat clip can lose to an unrelated class by a hair.
+# Restricting the winning candidate to this shortlist means the model only
+# has to be right about the exercises that actually matter. Edit freely to
+# add/remove - every entry must be a name from UCF101_CLASSES above.
+MAIN_WORKOUT_CLASSES = {
+    "BenchPress",
+    "BodyWeightSquats",
+    "CleanAndJerk",
+    "HandstandPushups",
+    "JumpingJack",
+    "JumpRope",
+    "Lunges",
+    "PullUps",
+    "PushUps",
+    "WallPushups",
+    "BoxingPunchingBag",
+    "Biking",
+    "Rowing",
+}
+
+# How many of the model's next-best guesses (after its outright top-1) to
+# still check for a curated class before giving up. Single-clip video models
+# (no multi-crop/multi-clip test-time averaging here) rarely put >15-20% of
+# the softmax mass on any one of 101 classes even when the top-1 is correct,
+# so gating on an absolute confidence floor rejects plenty of genuinely
+# correct "Squats"/"PushUps" guesses. Checking the top-K instead - and
+# trusting the model's own ranking - avoids that without requiring a
+# threshold that has to be re-tuned per checkpoint.
+_TOP_K_RUNNER_UP = 5
+
+
 class ActivityRecognizer:
     def __init__(self):
         models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
@@ -141,27 +185,47 @@ class ActivityRecognizer:
         clip = np.stack(processed, axis=1)                       # [3, 16, 112, 112]
         return torch.tensor(clip, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-    def predict(self, frames: List[np.ndarray]) -> Tuple[str, float]:
+    def predict(self, frames: List[np.ndarray]) -> Tuple[str, float, str]:
         """
-        Returns (encoder_class_name, confidence).
-        encoder_class_name is always one of:
+        Returns (display_label, confidence, encoder_class).
+        display_label is one of the curated MAIN_WORKOUT_CLASSES (formatted,
+            e.g. "Body Weight Squats") whenever the model's own top guess (or
+            one of its next-best few) is one of them; otherwise the generic
+            "Exercising" - naming a specific move whenever the model actually
+            thinks it's one of the ones we track, rather than only when its
+            raw softmax probability clears some absolute number (which video
+            models rarely do on a single clip, even when correct).
+        encoder_class is always one of:
             Cycling, HIIT, Running, Swimming, Walking, Weightlifting, Yoga
+        and is only for calorie-model MET lookups - callers should not display it.
         """
         if self.model is None or not frames:
-            return "HIIT", 0.90
+            return "Exercising", 0.90, "HIIT"
 
         try:
             clip = self.preprocess_clip(frames)
             with torch.no_grad():
                 out   = self.model(clip)
                 probs = torch.softmax(out, dim=1)[0]
-                top_p, top_i = torch.max(probs, dim=0)
 
-            ucf_class  = UCF101_CLASSES[int(top_i.item())] if int(top_i.item()) < len(UCF101_CLASSES) else "HIIT"
-            enc_class  = ucf_to_encoder_class(ucf_class)
-            confidence = float(top_p.item())
-            return enc_class, confidence
+            top_p, top_i = torch.max(probs, dim=0)
+            top_class = UCF101_CLASSES[int(top_i.item())] if int(top_i.item()) < len(UCF101_CLASSES) else None
+
+            if top_class in MAIN_WORKOUT_CLASSES:
+                enc_class = ucf_to_encoder_class(top_class)
+                return format_ucf_label(top_class), float(top_p.item()), enc_class
+
+            # The single best guess isn't one we track specifically - check
+            # its next-best runners-up before giving up on a specific name.
+            k = min(_TOP_K_RUNNER_UP, len(UCF101_CLASSES))
+            runners_up = torch.topk(probs, k)
+            for idx, p in zip(runners_up.indices.tolist(), runners_up.values.tolist()):
+                ucf_class = UCF101_CLASSES[idx]
+                if ucf_class in MAIN_WORKOUT_CLASSES:
+                    return format_ucf_label(ucf_class), float(p), ucf_to_encoder_class(ucf_class)
+
+            return "Exercising", float(top_p.item()), "HIIT"
 
         except Exception as e:
             print(f"MC3-18 inference error: {e}")
-            return "HIIT", 0.75
+            return "Exercising", 0.75, "HIIT"

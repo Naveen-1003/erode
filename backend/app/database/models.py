@@ -17,6 +17,7 @@ class User(Base):
     goal = Column(String, nullable=True)  # 'fat_to_fit', 'skinny_to_fit', or 'skinny_fat_to_fit'
     equipment_available = Column(Boolean, nullable=True)
     time_available = Column(String, nullable=True)  # '30_min', '1_hour', or '2_hour'
+    food_preference = Column(String, nullable=True)  # 'veg' or 'non_veg'
 
     workouts = relationship("Workout", back_populates="user", cascade="all, delete-orphan")
 

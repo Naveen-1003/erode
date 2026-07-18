@@ -51,6 +51,7 @@ _PENDING_COLUMNS = [
     ("users", "goal", "VARCHAR"),
     ("users", "equipment_available", "BOOLEAN"),
     ("users", "time_available", "VARCHAR"),
+    ("users", "food_preference", "VARCHAR"),
 ]
 
 def run_pending_migrations():

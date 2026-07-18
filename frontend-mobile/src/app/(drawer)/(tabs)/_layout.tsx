@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Tabs } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LayoutGrid, Camera, ClipboardList, ListChecks } from 'lucide-react-native';
+import { LayoutGrid, Camera, ClipboardList, ListChecks, ChefHat } from 'lucide-react-native';
 
 const GoalStatusContext = createContext<{ hasGoal: boolean | null; refreshGoal: () => void }>({
   hasGoal: null,
@@ -55,6 +55,13 @@ export default function TabLayout() {
           options={{
             title: 'Plan',
             tabBarIcon: ({ color, size }) => <ListChecks color={color} size={size} />,
+          }}
+        />
+        <Tabs.Screen
+          name="meals"
+          options={{
+            title: 'Meals',
+            tabBarIcon: ({ color, size }) => <ChefHat color={color} size={size} />,
           }}
         />
         <Tabs.Screen

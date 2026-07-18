@@ -13,7 +13,7 @@ Keys match `config.dataset_config.dataset_config['ava_v2.2']['label_map']`
 verbatim (including punctuation) so callers can index directly by model output.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 AVA_ACTION_MET: Dict[str, float] = {
     # Pose (1-14)
@@ -108,3 +108,66 @@ def get_met(action_label: str, default: float = 2.0) -> float:
     """MET for an AVA action label, clamped to a physiologically sane range."""
     met = AVA_ACTION_MET.get(action_label, default)
     return max(_MET_MIN, min(_MET_MAX, met))
+
+
+# AVA labels that map 1:1 onto one of the calorie model's 7-class vocabulary
+# (see app/ai/calorie_model.py::ENCODER_CLASSES) with NO loss of specificity -
+# "Running"/"Walking"/"Swimming"/"Cycling" are themselves exactly what a user
+# would call that activity, not a generic catch-all. Deliberately does NOT
+# include things like "martial art", "dance", "climb", "jump/leap", or
+# "fight/hit (a person)": collapsing those to "HIIT" would throw away a
+# perfectly specific, recognizable label for a vague bucket - exactly the
+# problem this whole label-naming pass exists to avoid. Those instead get
+# reported under their own raw label (see get_exercise_class returning None),
+# or - for jump/leap specifically - deferred to MC3-18's more specific guess
+# (e.g. "Jumping Jack") via prediction._POSE_AMBIGUOUS_ACTIONS.
+AVA_TO_EXERCISE_CLASS: Dict[str, str] = {
+    "run/jog": "Running",
+    "walk": "Walking",
+    "swim": "Swimming",
+    "ride (e.g., a bike, a car, a horse)": "Cycling",
+}
+
+
+def get_exercise_class(action_label: str) -> Optional[str]:
+    """The calorie model's exercise class for this AVA action, or None if it's
+    an everyday (non-workout) action that should be reported as-is."""
+    return AVA_TO_EXERCISE_CLASS.get(action_label)
+
+
+# Curated "main" everyday actions worth reporting on their own. AVA has 80
+# classes total, but most of the person-object/person-person ones (e.g.
+# "clink glass", "shovel", "sail boat", "give/serve (an object) to (a
+# person)") are narrow, visually similar to each other, and rarely what a
+# fitness/activity tracker cares about - accepting any of them as the
+# reported action trades accuracy for coverage nobody asked for. This list
+# is deliberately short: the core body poses (sit/stand/walk/...) plus a
+# handful of common, visually-distinctive social gestures. Edit freely to
+# add/remove labels - every key must exist in AVA_ACTION_MET above.
+MAIN_ACTIONS = {
+    "sit",
+    "stand",
+    "walk",
+    "bend/bow(at the waist)",
+    "crouch/kneel",
+    "lie/sleep",
+    "get up",
+    "fall down",
+    "jump/leap",
+    "dance",
+    "martial art",
+    "climb (e.g. a mountain)",
+    "fight/hit (a person)",
+    "hand wave",
+    "hand shake",
+    "hand clap",
+    "hug (a person)",
+}
+
+
+def get_allowed_actions() -> "set[str]":
+    """Every AVA label the app will ever report as a specific detected
+    action: the curated everyday actions above, plus whatever maps to an
+    exercise class (run/jog, swim, ride a bike, ...). Anything else AVA can
+    output is intentionally never surfaced - see MAIN_ACTIONS' docstring."""
+    return MAIN_ACTIONS | set(AVA_TO_EXERCISE_CLASS.keys())

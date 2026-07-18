@@ -14,10 +14,11 @@ import {
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL } from '../../services/api';
-import { User, Scale, Ruler, Calendar, LogOut, Save, Dumbbell, Clock } from 'lucide-react-native';
+import { User, Scale, Ruler, Calendar, LogOut, Save, Dumbbell, Clock, Salad } from 'lucide-react-native';
 import { DrawerMenuButton } from '../../components/drawer-menu-button';
 
 type TimeOption = '30_min' | '1_hour' | '2_hour';
+type FoodPreference = 'veg' | 'non_veg';
 
 const TIME_OPTIONS: { value: TimeOption; label: string }[] = [
   { value: '30_min', label: '30 Min' },
@@ -34,6 +35,7 @@ export default function ProfileScreen() {
   const [gender, setGender] = useState('M');
   const [equipmentAvailable, setEquipmentAvailable] = useState<boolean | null>(null);
   const [timeAvailable, setTimeAvailable] = useState<TimeOption | null>(null);
+  const [foodPreference, setFoodPreference] = useState<FoodPreference | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -68,6 +70,7 @@ export default function ProfileScreen() {
       setGender(data.gender);
       setEquipmentAvailable(data.equipment_available ?? null);
       setTimeAvailable(data.time_available ?? null);
+      setFoodPreference(data.food_preference ?? null);
     } catch (e) {
       console.error(e);
       Alert.alert('Error', 'Failed to load profile details.');
@@ -108,6 +111,7 @@ export default function ProfileScreen() {
           gender,
           equipment_available: equipmentAvailable,
           time_available: timeAvailable,
+          food_preference: foodPreference,
         })
       });
 
@@ -277,6 +281,27 @@ export default function ProfileScreen() {
                     </Text>
                   </TouchableOpacity>
                 ))}
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.inputRow}>
+            <Salad color="#FF3B30" size={20} style={styles.icon} />
+            <View style={styles.inputWrapper}>
+              <Text style={styles.label}>Food Preference</Text>
+              <View style={styles.genderContainer}>
+                <TouchableOpacity
+                  style={[styles.genderButton, foodPreference === 'veg' ? styles.genderButtonSelected : null]}
+                  onPress={() => setFoodPreference('veg')}
+                >
+                  <Text style={[styles.genderText, foodPreference === 'veg' ? styles.genderTextSelected : null]}>Veg</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.genderButton, foodPreference === 'non_veg' ? styles.genderButtonSelected : null]}
+                  onPress={() => setFoodPreference('non_veg')}
+                >
+                  <Text style={[styles.genderText, foodPreference === 'non_veg' ? styles.genderTextSelected : null]}>Non-Veg</Text>
+                </TouchableOpacity>
               </View>
             </View>
           </View>

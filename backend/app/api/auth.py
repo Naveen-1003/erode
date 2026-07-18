@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 VALID_GOALS = {"fat_to_fit", "skinny_to_fit", "skinny_fat_to_fit"}
 VALID_TIME_OPTIONS = {"30_min", "1_hour", "2_hour"}
+VALID_FOOD_PREFERENCES = {"veg", "non_veg"}
 
 # Pydantic Schemas
 class UserRegister(BaseModel):
@@ -42,6 +43,7 @@ class UserUpdate(BaseModel):
     goal: Optional[str] = None
     equipment_available: Optional[bool] = None
     time_available: Optional[str] = None
+    food_preference: Optional[str] = None
 
 class UserResponse(BaseModel):
     id: int
@@ -54,6 +56,7 @@ class UserResponse(BaseModel):
     goal: Optional[str] = None
     equipment_available: Optional[bool] = None
     time_available: Optional[str] = None
+    food_preference: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -218,6 +221,13 @@ def update_profile(
                 detail=f"Time available must be one of: {', '.join(sorted(VALID_TIME_OPTIONS))}"
             )
         current_user.time_available = profile_data.time_available
+    if profile_data.food_preference is not None:
+        if profile_data.food_preference not in VALID_FOOD_PREFERENCES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Food preference must be one of: {', '.join(sorted(VALID_FOOD_PREFERENCES))}"
+            )
+        current_user.food_preference = profile_data.food_preference
 
     db.commit()
     db.refresh(current_user)

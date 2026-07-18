@@ -21,11 +21,21 @@ from ..ai.intensity import IntensityEngine
 from ..ai.calorie_model import CalorieRegressor
 from ..ai.pose_energy_model import PoseEnergyEstimator
 from ..ai.yowo_action_model import YowoActionDetector
+from ..ai.ava_action_met import get_exercise_class
+from ..ai.kinetics_action_model import LifestyleActivityRecognizer, get_met as get_lifestyle_met
+from ..ai.yoga_pose_classifier import classify_yoga_pose, get_met as get_yoga_met
+from ..ai.walking_classifier import is_walking
 from ..services.video_processing import VideoProcessor
+from collections import Counter
 
 logger = logging.getLogger("burn_ex_prediction")
 
 router = APIRouter(prefix="/api/predict", tags=["prediction"])
+
+# Frames kept in the live feed's rolling buffer, matching the 16-frame window
+# YOWOv2/MC3-18/Kinetics-400 all expect. At the frontend's 1000ms capture
+# interval this is ~16 real seconds of motion.
+LIVE_ACTION_WINDOW = 16
 
 # Initialize heavy models once at startup (globals)
 activity_recognizer = ActivityRecognizer()
@@ -42,32 +52,105 @@ pose_energy_estimator = PoseEnergyEstimator()
 # (kcal/min = MET * 3.5 * weight / 200). Falls back to pose_energy_estimator /
 # calorie_regressor when no action clears YOWOv2's confidence threshold.
 yowo_action_detector = YowoActionDetector()
+# Broad everyday/lifestyle activity detector (washing dishes, laundry,
+# generic yoga, ...) using torchvision's stock Kinetics-400 weights - see
+# ai/kinetics_action_model.py. Neither YOWOv2/AVA nor MC3-18/UCF101 was ever
+# trained to recognize these. Only actually invoked when neither of those two
+# already has a confident, specific answer (see _should_check_lifestyle), so
+# its extra inference cost is paid only when it can actually change the result.
+lifestyle_recognizer = LifestyleActivityRecognizer()
 
-def _smart_combine_activity(yowo_res, mc3_exercise, mc3_conf):
-    STRONG_YOWO = {
-        "run/jog": "Running",
-        "swim": "Swimming",
-        "ride (e.g., a bike, a car, a horse)": "Cycling",
-        "dance": "HIIT",
-        "martial art": "HIIT"
-    }
-    
-    y_action = None
-    y_conf = 0.0
+# YOWOv2/AVA labels that are just a coarse, single-instant body pose - and so
+# are visually indistinguishable, frame-to-frame, from the up/down or
+# open/close cycle of a rep-based bodyweight exercise. A person doing squats
+# alternates between poses AVA calls "stand" and "sit"/"crouch" every rep; a
+# person doing jumping jacks alternates through "jump/leap"; AVA has no idea
+# it's watching a repeated exercise rather than someone literally sitting
+# down. MC3-18 looks at the whole 16-frame clip (not one instant) specifically
+# to recognize that kind of repetition, so when YOWOv2 reports one of these
+# AND MC3-18 confidently names one of its curated workouts, MC3-18's answer
+# wins; failing that, Kinetics-400 gets a turn (e.g. someone standing at a
+# sink washing dishes) - see _resolve_activity.
+_POSE_AMBIGUOUS_ACTIONS = {"sit", "stand", "crouch/kneel", "bend/bow(at the waist)", "get up", "jump/leap"}
+
+
+def _should_check_lifestyle(yowo_res, mc3_label) -> bool:
+    """Whether it's worth running Kinetics-400 lifestyle detection at all:
+    only when neither YOWOv2 nor MC3-18 already has a confident, specific
+    answer - running a third heavy model when its result would never be used
+    just burns latency for nothing. Mirrors the same condition _resolve_activity
+    checks internally - keep both in sync if you change one."""
+    if mc3_label != "Exercising":
+        return False
+    return yowo_res is None or yowo_res["action"] in _POSE_AMBIGUOUS_ACTIONS
+
+
+def _resolve_activity(yoga_pose, yowo_res, mc3_label, mc3_bucket, kinetics_result, pose_window=None):
+    """Return (display_activity, calorie_encoder_hint, met_hint), decided
+    together so they can never disagree about which source's guess won.
+
+    Priority:
+    0. yoga_pose: a confident geometric match from the pose landmarks (see
+       yoga_pose_classifier.py) - cheapest and most specific signal
+       available; yoga poses are static/distinctive enough that a confident
+       geometric match is trustworthy on its own.
+    1. YOWOv2 "big cardio" mapping (run/jog, walk, swim, ride) - unambiguous
+       and specific already.
+    2. YOWOv2 ambiguous single-pose (_POSE_AMBIGUOUS_ACTIONS): prefer
+       MC3-18's specific gym-workout guess if it has one; else Kinetics-400's
+       specific lifestyle-activity guess if it has one; else the gait-based
+       walking detector (walking_classifier.py) - catches a mid-stride
+       walking pose that AVA misreads as "stand"/"sit"; else fall back to
+       the raw YOWOv2 pose label.
+    3. YOWOv2 other specific everyday action (wave, hug, handshake, clap,
+       dance, martial art, climb, fight/hit, fall down, lie/sleep) - trust it.
+    4. No YOWOv2 detection: prefer MC3-18, then Kinetics-400, then the
+       gait-based walking detector, then a generic "Exercising".
+
+    calorie_encoder_hint lets calorie_model.py skip fuzzy-matching the
+    display text for the trained calorie model's required 7-class encoding
+    (which can disagree with the source model's own bucket, e.g. "Push Ups"
+    vs "Weightlifting"). met_hint is a precise, already-known MET (from
+    YOWOv2's own AVA table, the yoga pose's hand-tuned MET, or Kinetics-400's)
+    that callers can use directly for calorie math instead of re-deriving
+    one. Both None when nothing more precise than the activity name itself is
+    known (calorie_model.py's own AVA-aware matching applies instead).
+    """
+    if yoga_pose:
+        return yoga_pose, None, get_yoga_met(yoga_pose)
+
     if yowo_res:
         y_action = yowo_res["action"]
-        y_conf = yowo_res["confidence"]
-        
-    if y_action in STRONG_YOWO and y_conf > 0.3:
-        final_activity = STRONG_YOWO[y_action]
-    else:
-        final_activity = mc3_exercise
-        
-    if y_action:
-        # e.g. "Weightlifting - Sit"
-        final_activity = f"{final_activity} - {y_action.title()}"
-        
-    return final_activity
+        exercise = get_exercise_class(y_action)
+        if exercise:
+            return exercise, exercise, yowo_res["met"]
+        if y_action in _POSE_AMBIGUOUS_ACTIONS:
+            if mc3_label != "Exercising":
+                return mc3_label, mc3_bucket, None
+            if kinetics_result:
+                return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
+            if pose_window and is_walking(pose_window):
+                return "Walking", "Walking", None
+        return y_action, None, yowo_res["met"]
+
+    if mc3_label != "Exercising":
+        return mc3_label, mc3_bucket, None
+    if kinetics_result:
+        return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
+    if pose_window and is_walking(pose_window):
+        return "Walking", "Walking", None
+    return "Exercising", "HIIT", None
+
+
+def _majority_yoga_pose(pose_history: list) -> Optional[str]:
+    """Most common geometric yoga-pose match across a clip's pose landmarks,
+    requiring it to show up in a real share of frames (not just one noisy
+    frame) before it's trusted as the clip's activity."""
+    votes = [p for p in (classify_yoga_pose(lm) for lm in pose_history) if p]
+    if not votes:
+        return None
+    label, count = Counter(votes).most_common(1)[0]
+    return label if count / len(pose_history) >= 0.3 else None
 
 # Helper to authenticate WebSockets
 def get_websocket_user(token: str, db: Session) -> Optional[User]:
@@ -148,20 +231,33 @@ def predict_workout_video(
         if len(frames) == 0:
             raise HTTPException(status_code=400, detail="Invalid video file: No frames decoded.")
 
-        # 2. Activity recognition. Primary: YOWOv2 (pretrained, 80 AVA actions)
-        # on a 16-frame sample spread across the clip. Fallback: MC3-18/UCF101
-        # when YOWOv2 has no confident detection (e.g. no person clearly framed).
-        activity, confidence = activity_recognizer.predict(frames)
+        # 2. Pose landmark extraction (MediaPipe) - needed both for intensity
+        # and for the geometric yoga-pose check below.
+        pose_history = pose_estimator.process_video_frames(frames)
+
+        # 3. Activity recognition: run all three action models, then let
+        # _resolve_activity pick between them (MC3-18 wins for rep-based
+        # exercises YOWOv2 can only see as an ambiguous single pose - e.g.
+        # squats look like alternating "sit"/"stand" snapshots to YOWOv2 one
+        # frame at a time; Kinetics-400 covers everyday/lifestyle activities
+        # neither YOWOv2 nor MC3-18 was trained on, e.g. washing dishes).
+        mc3_label, confidence, mc3_bucket = activity_recognizer.predict(frames)
         sample_idx = np.linspace(0, len(frames) - 1, min(16, len(frames))).astype(int)
-        yowo_result = yowo_action_detector.predict_primary_action([frames[i] for i in sample_idx])
-        
-        activity = _smart_combine_activity(yowo_result, activity, confidence)
+        sampled_frames = [frames[i] for i in sample_idx]
+        yowo_result = yowo_action_detector.predict_primary_action(sampled_frames)
+
+        kinetics_result = None
+        if lifestyle_recognizer.available and _should_check_lifestyle(yowo_result, mc3_label):
+            kinetics_result = lifestyle_recognizer.predict(sampled_frames)
+
+        yoga_pose = _majority_yoga_pose(pose_history)
+
+        activity, calorie_hint, met_hint = _resolve_activity(
+            yoga_pose, yowo_result, mc3_label, mc3_bucket, kinetics_result, pose_history
+        )
         if yowo_result:
             confidence = max(confidence, yowo_result["confidence"])
-        
-        # 3. Pose landmark extraction (MediaPipe)
-        pose_history = pose_estimator.process_video_frames(frames)
-        
+
         # 4. Intensity engine calculation
         intensity_data = intensity_engine.calculate_intensity(pose_history, fps=metadata["fps"])
         movement_score = intensity_data["movement_score"]
@@ -193,7 +289,9 @@ def predict_workout_video(
                 weight=u_weight,
                 duration_seconds=workout_duration,
                 movement_score=movement_score,
-                gender=u_gender
+                gender=u_gender,
+                encoder_class_hint=calorie_hint,
+                met_hint=met_hint,
             )
         
         # 6. Save workout to database
@@ -266,8 +364,15 @@ async def live_predict_websocket(websocket: WebSocket):
         frame_counter = 0
         workout_frames_data = []
         import asyncio
-        yowo_state = {"is_detecting": False, "latest_activity": "Auto-Detect", "latest_met": None}
-        
+        yowo_state = {"is_detecting": False, "latest_activity": "Auto-Detect", "latest_met": None, "latest_bucket_hint": None}
+        # Rolling buffer of the most recent raw camera frames (capped at
+        # ACTION_WINDOW, ~1 real frame/sec from the frontend's 1000ms capture
+        # interval - see below). Motion-dependent activities (walking,
+        # running, washing dishes, ...) are invisible to a single frozen
+        # frame repeated 16 times, which is what this buffer replaces as the
+        # input to the action models - see run_yowo_inference below.
+        frame_buffer: List[np.ndarray] = []
+
         # 2. Message Loop
         while True:
             data_str = await websocket.receive_text()
@@ -283,7 +388,8 @@ async def live_predict_websocket(websocket: WebSocket):
                 last_frame_timestamp = None
                 frame_counter = 0
                 workout_frames_data = []
-                yowo_state = {"is_detecting": False, "latest_activity": current_activity, "latest_met": None}
+                yowo_state = {"is_detecting": False, "latest_activity": current_activity, "latest_met": None, "latest_bucket_hint": None}
+                frame_buffer = []
                 await websocket.send_json({"status": "workout_started", "activity": current_activity})
                 continue
                 
@@ -314,28 +420,45 @@ async def live_predict_websocket(websocket: WebSocket):
                 except Exception:
                     continue
 
-                # Auto-detect activity for this frame. On a 1 FPS live stream, a 16-frame
-                # temporal buffer creates a disjointed montage that breaks YOWOv2.
-                # To prevent 3D CNN inference from blocking the async websocket loop (which
-                # causes ping timeouts and session drops), we run it in a background thread.
+                frame_buffer.append(frame)
+                if len(frame_buffer) > LIVE_ACTION_WINDOW:
+                    frame_buffer.pop(0)
+
+                # Auto-detect activity from the rolling frame_buffer (real motion
+                # over the last ~LIVE_ACTION_WINDOW seconds at 1 FPS), not a single
+                # frozen frame - motion-dependent activities (walking, washing
+                # dishes, ...) are invisible to a repeated single frame, which is
+                # what this app used until frame buffering was added. A short,
+                # varied window can occasionally look like a "montage" rather than
+                # one clean repetition, but that's a far smaller cost than having
+                # zero motion signal at all.
+                # To prevent 3D CNN inference from blocking the async websocket loop
+                # (which causes ping timeouts and session drops), we run it in a
+                # background thread on a snapshot of the buffer (copied so the main
+                # loop can keep appending to frame_buffer while this runs).
                 if not yowo_state["is_detecting"]:
                     yowo_state["is_detecting"] = True
-                    def run_yowo_inference(f, state):
+                    def run_yowo_inference(frames_window, pose_window, state):
                         try:
-                            # Run BOTH models on the single frame
-                            y_res = yowo_action_detector.predict_primary_action([f])
-                            mc3_class, mc3_conf = activity_recognizer.predict([f])
-                            
-                            combined = _smart_combine_activity(y_res, mc3_class, mc3_conf)
-                            state["latest_activity"] = combined
-                            if y_res is not None:
-                                state["latest_met"] = y_res["met"]
+                            # Run all three action models on the real frame window
+                            y_res = yowo_action_detector.predict_primary_action(frames_window)
+                            mc3_label, _, mc3_bucket = activity_recognizer.predict(frames_window)
+
+                            kinetics_result = None
+                            if lifestyle_recognizer.available and _should_check_lifestyle(y_res, mc3_label):
+                                kinetics_result = lifestyle_recognizer.predict(frames_window)
+
+                            state["latest_activity"], state["latest_bucket_hint"], state["latest_met"] = (
+                                _resolve_activity(None, y_res, mc3_label, mc3_bucket, kinetics_result, pose_window)
+                            )
                         except Exception as e:
                             logger.error(f"Background AI error: {e}")
                         finally:
                             state["is_detecting"] = False
-                            
-                    asyncio.get_running_loop().run_in_executor(None, run_yowo_inference, frame, yowo_state)
+
+                    asyncio.get_running_loop().run_in_executor(
+                        None, run_yowo_inference, list(frame_buffer), list(pose_history), yowo_state
+                    )
 
                 current_activity = yowo_state["latest_activity"]
 
@@ -356,6 +479,16 @@ async def live_predict_websocket(websocket: WebSocket):
                     })
                     continue
 
+                # Cheap, synchronous geometric yoga-pose check (no model, just
+                # joint-angle math on the landmarks we already have) - overrides
+                # whatever the (slower, background-threaded) action models last
+                # decided, since a confident geometric pose match is the most
+                # specific signal available - see yoga_pose_classifier.py.
+                yoga_pose = classify_yoga_pose(landmarks)
+                yoga_met = get_yoga_met(yoga_pose) if yoga_pose else None
+                if yoga_pose:
+                    current_activity = yoga_pose
+
                 pose_history.append(landmarks)
                 if len(pose_history) > 30:  # 30 frames @ 1 FPS = 30-second window
                     pose_history.pop(0)
@@ -365,16 +498,19 @@ async def live_predict_websocket(websocket: WebSocket):
                 movement_score = intensity_res["movement_score"]
                 intensity_level = intensity_res["intensity"]
 
-                # Incremental accumulation. Primary: YOWOv2's detected action MET
+                # Incremental accumulation. Primary: the yoga pose's own MET, if
+                # one was just detected. Fallback 1: YOWOv2's detected action MET
                 # (hardcoded per-action, see ava_action_met.py) -> kcal/sec, same
                 # formula used everywhere else (MET * 3.5 * weight / 200 / 60).
-                # Fallback 1: pose->energy regressor's own kcal/sec rate. Fallback
-                # 2: MET-table/XGBoost formula, for when neither model is available.
+                # Fallback 2: pose->energy regressor's own kcal/sec rate. Fallback
+                # 3: MET-table/XGBoost formula, for when neither model is available.
                 if last_frame_timestamp is not None:
                     time_slice = min(timestamp - last_frame_timestamp, 3.0)
                     if time_slice > 0:
                         calorie_rate = None
-                        if yowo_state["latest_met"] is not None:
+                        if yoga_met is not None:
+                            calorie_rate = yoga_met * 3.5 * user.weight / 200.0 / 60.0
+                        if calorie_rate is None and yowo_state["latest_met"] is not None:
                             calorie_rate = yowo_state["latest_met"] * 3.5 * user.weight / 200.0 / 60.0
                         if calorie_rate is None and pose_energy_estimator.available:
                             calorie_rate = pose_energy_estimator.calorie_rate_per_second(
@@ -385,6 +521,7 @@ async def live_predict_websocket(websocket: WebSocket):
                                 activity=current_activity,
                                 weight=user.weight,
                                 intensity=intensity_level,
+                                encoder_class_hint=yowo_state.get("latest_bucket_hint"),
                             )
                         frame_calories = calorie_rate * time_slice
                         cumulative_calories += frame_calories
@@ -416,6 +553,11 @@ async def live_predict_websocket(websocket: WebSocket):
 
                 active_duration = max(0.1, timestamp - start_time)
 
+                yoga_pose = classify_yoga_pose(landmarks)
+                yoga_met = get_yoga_met(yoga_pose) if yoga_pose else None
+                if yoga_pose:
+                    current_activity = yoga_pose
+
                 pose_history.append(landmarks)
                 if len(pose_history) > 150:
                     pose_history.pop(0)
@@ -429,7 +571,9 @@ async def live_predict_websocket(websocket: WebSocket):
                     time_slice = min(timestamp - last_frame_timestamp, 3.0)
                     if time_slice > 0:
                         calorie_rate = None
-                        if pose_energy_estimator.available:
+                        if yoga_met is not None:
+                            calorie_rate = yoga_met * 3.5 * user.weight / 200.0 / 60.0
+                        if calorie_rate is None and pose_energy_estimator.available:
                             calorie_rate = pose_energy_estimator.calorie_rate_per_second(
                                 pose_history, user.weight
                             )
@@ -463,7 +607,6 @@ async def live_predict_websocket(websocket: WebSocket):
                     
                     final_activity = current_activity
                     if workout_frames_data:
-                        from collections import Counter
                         activities = [f["action_detected"] for f in workout_frames_data]
                         final_activity = Counter(activities).most_common(1)[0][0]
                     
@@ -510,7 +653,6 @@ async def live_predict_websocket(websocket: WebSocket):
                 try:
                     final_activity = current_activity
                     if workout_frames_data:
-                        from collections import Counter
                         activities = [f["action_detected"] for f in workout_frames_data]
                         final_activity = Counter(activities).most_common(1)[0][0]
                     

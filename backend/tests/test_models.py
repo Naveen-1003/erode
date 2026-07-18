@@ -48,11 +48,12 @@ def test_calorie_regressor():
 
 def test_activity_recognizer():
     recognizer = ActivityRecognizer()
-    
+
     # Create 16 dummy frames (black images)
     dummy_frames = [np.zeros((120, 160, 3), dtype=np.uint8) for _ in range(16)]
-    activity, confidence = recognizer.predict(dummy_frames)
-    
+    activity, confidence, encoder_class = recognizer.predict(dummy_frames)
+
     assert isinstance(activity, str)
     assert isinstance(confidence, float)
     assert 0.0 <= confidence <= 1.0
+    assert encoder_class in {"Cycling", "HIIT", "Running", "Swimming", "Walking", "Weightlifting", "Yoga"}

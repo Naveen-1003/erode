@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .ava_action_met import get_met
+from .ava_action_met import get_met, get_allowed_actions
 
 _YOWO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "third_party_yowov2")
@@ -160,10 +160,21 @@ class YowoActionDetector:
     def predict_primary_action(
         self, frames_bgr: List[np.ndarray]
     ) -> Optional[Dict[str, float]]:
-        """Convenience wrapper: the single highest-confidence detected action,
-        with its hardcoded MET value, or None if nothing cleared threshold."""
-        hits = self.predict(frames_bgr)
-        if not hits:
-            return None
-        label, score = hits[0]
-        return {"action": label, "confidence": score, "met": get_met(label)}
+        """Convenience wrapper: the highest-confidence detected action that's
+        also in the curated "main actions" allowlist (ava_action_met.
+        get_allowed_actions), with its hardcoded MET value. None if nothing
+        both cleared the confidence threshold AND is one of those labels.
+
+        AVA has 80 classes total; `predict()` already returns every one that
+        clears CONF_THRESH, sorted by score. Restricting which of those can
+        become the *reported* action - rather than always taking hits[0] -
+        means a rare/easily-confused class (e.g. "clink glass", "shovel")
+        never gets surfaced just because it out-scored the common cases this
+        turn; we skip past it to the next candidate that's actually a label
+        users care about, or report nothing at all if none qualify.
+        """
+        allowed = get_allowed_actions()
+        for label, score in self.predict(frames_bgr):
+            if label in allowed:
+                return {"action": label, "confidence": score, "met": get_met(label)}
+        return None

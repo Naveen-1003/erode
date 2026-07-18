@@ -12,9 +12,10 @@ import {
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL } from '../services/api';
-import { Dumbbell, Clock, ArrowRight } from 'lucide-react-native';
+import { Dumbbell, Clock, ArrowRight, Salad } from 'lucide-react-native';
 
 type TimeOption = '30_min' | '1_hour' | '2_hour';
+type FoodPreference = 'veg' | 'non_veg';
 
 const TIME_OPTIONS: { value: TimeOption; label: string }[] = [
   { value: '30_min', label: '30 Min' },
@@ -25,6 +26,7 @@ const TIME_OPTIONS: { value: TimeOption; label: string }[] = [
 export default function WorkoutPreferencesScreen() {
   const [equipmentAvailable, setEquipmentAvailable] = useState<boolean | null>(null);
   const [timeAvailable, setTimeAvailable] = useState<TimeOption | null>(null);
+  const [foodPreference, setFoodPreference] = useState<FoodPreference | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
 
@@ -48,6 +50,7 @@ export default function WorkoutPreferencesScreen() {
         body: JSON.stringify({
           equipment_available: equipmentAvailable,
           time_available: timeAvailable,
+          food_preference: foodPreference,
         }),
       });
 
@@ -75,7 +78,7 @@ export default function WorkoutPreferencesScreen() {
         <View style={styles.header}>
           <Text style={styles.title}>Let's Personalize Your Plan</Text>
           <Text style={styles.subtitle}>
-            A couple quick questions so we can tailor workouts to what you actually have to work with.
+            A couple quick questions so we can tailor your workouts and meals to what you actually have to work with.
           </Text>
         </View>
 
@@ -124,6 +127,33 @@ export default function WorkoutPreferencesScreen() {
                 </Text>
               </TouchableOpacity>
             ))}
+          </View>
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <Salad color="#FF3B30" size={20} />
+            <Text style={styles.cardTitle}>What's your food preference?</Text>
+          </View>
+          <View style={styles.optionRow}>
+            <TouchableOpacity
+              style={[styles.optionButton, foodPreference === 'veg' && styles.optionButtonSelected]}
+              onPress={() => setFoodPreference('veg')}
+              disabled={submitting}
+            >
+              <Text style={[styles.optionText, foodPreference === 'veg' && styles.optionTextSelected]}>
+                Veg
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.optionButton, foodPreference === 'non_veg' && styles.optionButtonSelected]}
+              onPress={() => setFoodPreference('non_veg')}
+              disabled={submitting}
+            >
+              <Text style={[styles.optionText, foodPreference === 'non_veg' && styles.optionTextSelected]}>
+                Non-Veg
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
 
