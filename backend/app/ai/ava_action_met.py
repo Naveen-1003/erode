@@ -154,6 +154,7 @@ MAIN_ACTIONS = {
     "get up",
     "fall down",
     "jump/leap",
+    "run/jog",
     "dance",
     "martial art",
     "climb (e.g. a mountain)",

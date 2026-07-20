@@ -103,7 +103,13 @@ class LifestyleActivityRecognizer:
             idx = np.linspace(0, len(frames_bgr) - 1, WINDOW).astype(int)
             clip = [frames_bgr[i] for i in idx]
 
-        rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in clip]
+        target_size = (clip[0].shape[1], clip[0].shape[0])
+        rgb_frames = []
+        for f in clip:
+            if f.shape[:2] != clip[0].shape[:2]:
+                f = cv2.resize(f, target_size)
+            rgb_frames.append(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+            
         clip_np = np.stack(rgb_frames, axis=0)  # [T, H, W, C] uint8
         clip_tensor = torch.from_numpy(clip_np).permute(0, 3, 1, 2)  # [T, C, H, W] uint8
         transformed = self.transforms(clip_tensor)  # -> [C, T, H, W] float, normalized

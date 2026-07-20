@@ -24,7 +24,7 @@ from ..ai.yowo_action_model import YowoActionDetector
 from ..ai.ava_action_met import get_exercise_class
 from ..ai.kinetics_action_model import LifestyleActivityRecognizer, get_met as get_lifestyle_met
 from ..ai.yoga_pose_classifier import classify_yoga_pose, get_met as get_yoga_met
-from ..ai.walking_classifier import is_walking
+from ..ai.walking_classifier import extract_gait_features, detect_gait
 from ..services.video_processing import VideoProcessor
 from collections import Counter
 
@@ -36,6 +36,14 @@ router = APIRouter(prefix="/api/predict", tags=["prediction"])
 # YOWOv2/MC3-18/Kinetics-400 all expect. At the frontend's 1000ms capture
 # interval this is ~16 real seconds of motion.
 LIVE_ACTION_WINDOW = 16
+
+# How many recent per-frame resolved activities the *displayed* live activity
+# is majority-voted over, so one stale background-inference result or one
+# noisy single-frame yoga match doesn't instantly flip what the user sees.
+# Mirrors the majority-vote already applied to the final saved
+# Workout.activity (see stop_workout/disconnect below), just applied to the
+# live display too.
+DISPLAY_SMOOTHING_WINDOW = 5
 
 # Initialize heavy models once at startup (globals)
 activity_recognizer = ActivityRecognizer()
@@ -71,17 +79,30 @@ lifestyle_recognizer = LifestyleActivityRecognizer()
 # AND MC3-18 confidently names one of its curated workouts, MC3-18's answer
 # wins; failing that, Kinetics-400 gets a turn (e.g. someone standing at a
 # sink washing dishes) - see _resolve_activity.
-_POSE_AMBIGUOUS_ACTIONS = {"sit", "stand", "crouch/kneel", "bend/bow(at the waist)", "get up", "jump/leap"}
+_POSE_AMBIGUOUS_ACTIONS = {
+    "sit",
+    "stand",
+    "bend/bow(at the waist)",
+    "crouch/kneel",
+    "lie/sleep",
+    "get up",
+    "fall down",
+    "hand wave",
+    "hand shake",
+    "hand clap",
+    "hug (a person)",
+    "fight/hit (a person)",
+}
 
 
-def _should_check_lifestyle(yowo_res, mc3_label) -> bool:
-    """Whether it's worth running Kinetics-400 lifestyle detection at all:
-    only when neither YOWOv2 nor MC3-18 already has a confident, specific
-    answer - running a third heavy model when its result would never be used
-    just burns latency for nothing. Mirrors the same condition _resolve_activity
-    checks internally - keep both in sync if you change one."""
-    if mc3_label != "Exercising":
-        return False
+def _lifestyle_could_matter(yowo_res, mc3_label) -> bool:
+    """Whether Kinetics-400's lifestyle-activity guess could actually change
+    the resolved activity: only when MC3-18 has nothing specific to say AND
+    YOWOv2 detected nothing or only an ambiguous single-pose action. Single
+    source of truth for both (a) the pre-inference gate below - running a
+    third heavy model when its result would never be used just burns latency
+    for nothing - and (b) _resolve_activity's own arbitration, so the two can
+    never drift out of sync with each other."""
     return yowo_res is None or yowo_res["action"] in _POSE_AMBIGUOUS_ACTIONS
 
 
@@ -99,13 +120,13 @@ def _resolve_activity(yoga_pose, yowo_res, mc3_label, mc3_bucket, kinetics_resul
     2. YOWOv2 ambiguous single-pose (_POSE_AMBIGUOUS_ACTIONS): prefer
        MC3-18's specific gym-workout guess if it has one; else Kinetics-400's
        specific lifestyle-activity guess if it has one; else the gait-based
-       walking detector (walking_classifier.py) - catches a mid-stride
-       walking pose that AVA misreads as "stand"/"sit"; else fall back to
-       the raw YOWOv2 pose label.
+       walking/running detector (walking_classifier.py) - catches a
+       mid-stride walking pose that AVA misreads as "stand"/"sit"; else fall
+       back to the raw YOWOv2 pose label.
     3. YOWOv2 other specific everyday action (wave, hug, handshake, clap,
        dance, martial art, climb, fight/hit, fall down, lie/sleep) - trust it.
     4. No YOWOv2 detection: prefer MC3-18, then Kinetics-400, then the
-       gait-based walking detector, then a generic "Exercising".
+       gait-based walking/running detector, then a generic "Exercising".
 
     calorie_encoder_hint lets calorie_model.py skip fuzzy-matching the
     display text for the trained calorie model's required 7-class encoding
@@ -125,20 +146,24 @@ def _resolve_activity(yoga_pose, yowo_res, mc3_label, mc3_bucket, kinetics_resul
         if exercise:
             return exercise, exercise, yowo_res["met"]
         if y_action in _POSE_AMBIGUOUS_ACTIONS:
+            if _lifestyle_could_matter(yowo_res, mc3_label) and kinetics_result:
+                return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
             if mc3_label != "Exercising":
                 return mc3_label, mc3_bucket, None
-            if kinetics_result:
-                return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
-            if pose_window and is_walking(pose_window):
-                return "Walking", "Walking", None
+        if pose_window:
+            gait = detect_gait(pose_window)
+            if gait:
+                return gait, gait, None
         return y_action, None, yowo_res["met"]
 
+    if pose_window:
+        gait = detect_gait(pose_window)
+        if gait:
+            return gait, gait, None
+    if _lifestyle_could_matter(yowo_res, mc3_label) and kinetics_result:
+        return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
     if mc3_label != "Exercising":
         return mc3_label, mc3_bucket, None
-    if kinetics_result:
-        return kinetics_result[0], None, get_lifestyle_met(kinetics_result[0])
-    if pose_window and is_walking(pose_window):
-        return "Walking", "Walking", None
     return "Exercising", "HIIT", None
 
 
@@ -247,7 +272,7 @@ def predict_workout_video(
         yowo_result = yowo_action_detector.predict_primary_action(sampled_frames)
 
         kinetics_result = None
-        if lifestyle_recognizer.available and _should_check_lifestyle(yowo_result, mc3_label):
+        if lifestyle_recognizer.available and _lifestyle_could_matter(yowo_result, mc3_label):
             kinetics_result = lifestyle_recognizer.predict(sampled_frames)
 
         yoga_pose = _majority_yoga_pose(pose_history)
@@ -293,7 +318,7 @@ def predict_workout_video(
                 encoder_class_hint=calorie_hint,
                 met_hint=met_hint,
             )
-        
+
         # 6. Save workout to database
         db_workout = Workout(
             user_id=current_user.id,
@@ -305,7 +330,7 @@ def predict_workout_video(
         db.add(db_workout)
         db.commit()
         db.refresh(db_workout)
-        
+
         return {
             "id": db_workout.id,
             "activity": activity,
@@ -363,6 +388,7 @@ async def live_predict_websocket(websocket: WebSocket):
         current_activity = "Auto-Detect" # Default or client-defined
         frame_counter = 0
         workout_frames_data = []
+        smoothing_window: List[str] = []
         import asyncio
         yowo_state = {"is_detecting": False, "latest_activity": "Auto-Detect", "latest_met": None, "latest_bucket_hint": None}
         # Rolling buffer of the most recent raw camera frames (capped at
@@ -388,6 +414,7 @@ async def live_predict_websocket(websocket: WebSocket):
                 last_frame_timestamp = None
                 frame_counter = 0
                 workout_frames_data = []
+                smoothing_window = []
                 yowo_state = {"is_detecting": False, "latest_activity": current_activity, "latest_met": None, "latest_bucket_hint": None}
                 frame_buffer = []
                 await websocket.send_json({"status": "workout_started", "activity": current_activity})
@@ -445,7 +472,7 @@ async def live_predict_websocket(websocket: WebSocket):
                             mc3_label, _, mc3_bucket = activity_recognizer.predict(frames_window)
 
                             kinetics_result = None
-                            if lifestyle_recognizer.available and _should_check_lifestyle(y_res, mc3_label):
+                            if lifestyle_recognizer.available and _lifestyle_could_matter(y_res, mc3_label):
                                 kinetics_result = lifestyle_recognizer.predict(frames_window)
 
                             state["latest_activity"], state["latest_bucket_hint"], state["latest_met"] = (
@@ -488,6 +515,16 @@ async def live_predict_websocket(websocket: WebSocket):
                 yoga_met = get_yoga_met(yoga_pose) if yoga_pose else None
                 if yoga_pose:
                     current_activity = yoga_pose
+
+                # Smooth the *displayed* activity over a short recent window so
+                # a single stale background-inference result or one noisy
+                # yoga-pose match doesn't instantly flip what the user sees -
+                # same majority-vote idea already used for the final saved
+                # Workout.activity, just applied live and over a shorter window.
+                smoothing_window.append(current_activity)
+                if len(smoothing_window) > DISPLAY_SMOOTHING_WINDOW:
+                    smoothing_window.pop(0)
+                current_activity = Counter(smoothing_window).most_common(1)[0][0]
 
                 pose_history.append(landmarks)
                 if len(pose_history) > 30:  # 30 frames @ 1 FPS = 30-second window
@@ -544,58 +581,6 @@ async def live_predict_websocket(websocket: WebSocket):
                     "pose_detected": True,
                 })
 
-            elif event == "frame_landmarks":
-                landmarks = message.get("landmarks")
-                timestamp = message.get("timestamp")
-
-                if not landmarks or not start_time:
-                    continue
-
-                active_duration = max(0.1, timestamp - start_time)
-
-                yoga_pose = classify_yoga_pose(landmarks)
-                yoga_met = get_yoga_met(yoga_pose) if yoga_pose else None
-                if yoga_pose:
-                    current_activity = yoga_pose
-
-                pose_history.append(landmarks)
-                if len(pose_history) > 150:
-                    pose_history.pop(0)
-
-                # fps=10.0 matches the 100ms interval used by older clients
-                intensity_res = intensity_engine.calculate_intensity(pose_history, fps=10.0)
-                movement_score = intensity_res["movement_score"]
-                intensity_level = intensity_res["intensity"]
-
-                if last_frame_timestamp is not None:
-                    time_slice = min(timestamp - last_frame_timestamp, 3.0)
-                    if time_slice > 0:
-                        calorie_rate = None
-                        if yoga_met is not None:
-                            calorie_rate = yoga_met * 3.5 * user.weight / 200.0 / 60.0
-                        if calorie_rate is None and pose_energy_estimator.available:
-                            calorie_rate = pose_energy_estimator.calorie_rate_per_second(
-                                pose_history, user.weight
-                            )
-                        if calorie_rate is None:
-                            calorie_rate = calorie_regressor.met_rate_per_second(
-                                activity=current_activity,
-                                weight=user.weight,
-                                intensity=intensity_level,
-                            )
-                        cumulative_calories += calorie_rate * time_slice
-                last_frame_timestamp = timestamp
-
-                await websocket.send_json({
-                    "event": "live_update",
-                    "duration": round(active_duration, 1),
-                    "movement_score": movement_score,
-                    "intensity": intensity_level,
-                    "calories": round(cumulative_calories, 2),
-                    "activity": current_activity,
-                    "pose_detected": True,
-                })
-                
             elif event == "stop_workout":
                 duration = message.get("duration", 0.0)
                 

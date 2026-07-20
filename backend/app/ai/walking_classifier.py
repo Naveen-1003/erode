@@ -155,22 +155,33 @@ else:
           "(untuned anti-phase correlation threshold). Run train_walking_classifier.py to train the real one.")
 
 
-def is_walking(pose_window: List[List[Dict[str, float]]]) -> bool:
-    """True if the recent pose history shows a walking-like gait."""
+def detect_gait(pose_window: List[List[Dict[str, float]]]) -> Optional[str]:
+    """Returns 'Walking' or 'Running' if the recent pose history shows a gait cycle, else None."""
     if not pose_window or len(pose_window) < MIN_FRAMES:
-        return False
+        return None
 
     window = pose_window[-WINDOW:]
     simple_frames = [f for f in (_simple_frame_from_mediapipe(lm) for lm in window) if f is not None]
     feats = extract_gait_features(simple_frames)
     if feats is None:
-        return False
+        return None
 
+    is_gait = False
     if _trained_model is not None:
         prob = float(_trained_model.predict_proba([feats])[0][1])
-        return prob >= _MIN_TRAINED_CONF
+        is_gait = prob >= _MIN_TRAINED_CONF
+    else:
+        is_gait = _classify_by_rule(feats)
 
-    return _classify_by_rule(feats)
+    if not is_gait:
+        return None
+        
+    # We have a valid alternating gait. Distinguish running from walking by swing amplitude.
+    l_ankle_std, r_ankle_std, _, _, _, _, _ = feats
+    run_swing_std = 0.07  # High-amplitude ankle swing indicates running
+    if l_ankle_std > run_swing_std or r_ankle_std > run_swing_std:
+        return "Running"
+    return "Walking"
 
 
 def _classify_by_rule(feats: np.ndarray) -> bool:
